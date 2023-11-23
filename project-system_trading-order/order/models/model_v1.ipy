@@ -1,0 +1,105 @@
+import pandas as pd
+from functools import reduce
+
+
+class FUNDAMENTAL_MODEL:
+    def __init__(self, FUNDAMENTAL_FACTOR_PREPROCESSOR, FUNDAMENTAL_FACTOR_FILTER, FUNDAMENTAL_CFG) -> None:
+        self.FUNDAMENTAL_FACTOR_PREPROCESSOR = FUNDAMENTAL_FACTOR_PREPROCESSOR
+        self.FUNDAMENTAL_FACTOR_FILTER = FUNDAMENTAL_FACTOR_FILTER
+        self.FUNDAMENTAL_CFG = FUNDAMENTAL_CFG
+
+    def get_fundamental_factors_df(self, ohlcv_df, dart_fundamental_processor, fdr_info_processor):
+        fundamental_factor_preprocessor = self.FUNDAMENTAL_FACTOR_PREPROCESSOR(
+            ohlcv_df, dart_fundamental_processor, fdr_info_processor
+        )
+        fundamental_factors_df = fundamental_factor_preprocessor.get_fundamental_factors_df(
+            self.FUNDAMENTAL_CFG["PREPROCESSOR_CFG"]
+        )
+        return fundamental_factors_df
+
+    def get_fundamental_filtered_stockcodes(self, fundamental_factors_df, filtered_stockcodes):
+        fundamental_factor_filter = self.FUNDAMENTAL_FACTOR_FILTER(fundamental_factors_df)
+        fundamental_filtered_df = fundamental_factor_filter.get_fundamental_filtered_df(
+            self.FUNDAMENTAL_CFG["FILTER_CFG"]
+        )
+        fundamental_filtered_stockcodes = set(fundamental_filtered_df["StockCode"])
+        if filtered_stockcodes:
+            fundamental_filtered_stockcodes = set(fundamental_filtered_stockcodes) & set(filtered_stockcodes)
+        return fundamental_filtered_stockcodes
+
+    def __call__(self, ohlcv_df, dart_fundamental_processor, fdr_info_processor, filtered_stockcodes=None):
+        fundamental_factors_df = self.get_fundamental_factors_df(
+            ohlcv_df, dart_fundamental_processor, fdr_info_processor
+        )
+        fundamental_filtered_stockcodes = self.get_fundamental_filtered_stockcodes(
+            fundamental_factors_df, filtered_stockcodes
+        )
+        return fundamental_filtered_stockcodes
+
+
+class TECHNICAL_MODEL:
+    def __init__(self, VOLUME_RELATIVE_STRENGTH_PROCESSOR, TECHNICAL_MODEL_FILTER, TECHNICAL_CFG) -> None:
+        self.VOLUME_RELATIVE_STRENGTH_PROCESSOR = VOLUME_RELATIVE_STRENGTH_PROCESSOR
+        self.TECHNICAL_MODEL_FILTER = TECHNICAL_MODEL_FILTER
+        self.TECHNICAL_CFG = TECHNICAL_CFG
+
+    def get_technical_factor_df(self, ohlcv_df, Price="Close"):
+        volume_relative_strength_processor = self.VOLUME_RELATIVE_STRENGTH_PROCESSOR()
+        technical_factor_df = volume_relative_strength_processor(
+            ohlcv_df.rename(columns={Price: "Price"}), self.TECHNICAL_CFG["MODEL_CFG"]
+        )
+        return technical_factor_df
+
+    def get_technical_filtered_stockcodes(self, technical_factor_df, filtered_stockcodes):
+        technical_model_filter = self.TECHNICAL_MODEL_FILTER(technical_factor_df, self.TECHNICAL_CFG["FILTER_CFG"])
+        technical_filtered_stockcodes = technical_model_filter.get_technical_filtered_stockcodes()
+        if filtered_stockcodes:
+            technical_filtered_stockcodes = technical_filtered_stockcodes & set(filtered_stockcodes)
+        return technical_filtered_stockcodes
+
+    def __call__(self, ohlcv_df, filtered_stockcodes=None):
+        technical_factor_df = self.get_technical_factor_df(ohlcv_df, "Close")
+        technical_filtered_stockcodes = self.get_technical_filtered_stockcodes(technical_factor_df, filtered_stockcodes)
+        return technical_filtered_stockcodes
+
+
+class TRADER_MODEL:
+    def __init__(self, pykrx_loader, TRADER_CFG) -> None:
+        self.pykrx_loader = pykrx_loader
+        self.TRADER_CFG = TRADER_CFG
+
+    def load_trader_factor_df(self, filtered_stockcodes):
+        stock_trade_dict = dict()
+        for stockcode in filtered_stockcodes:
+            _trader_df = self.pykrx_loader.get_stock_trader_df(
+                StockCode=stockcode,
+                start=self.TRADER_CFG["LOADER_CFG"]["start_date"],
+                end=self.TRADER_CFG["LOADER_CFG"]["end_date"],
+            )
+            df = _trader_df.reset_index(drop=True).multiply(pd.Series(range(1, len(_trader_df) + 1)), axis=0)
+            stock_trade_dict[stockcode] = df.sum(axis=0).to_dict()
+        trader_factor_df = pd.DataFrame(stock_trade_dict).T
+        trader_factor_df.reset_index(names="StockCode", inplace=True)
+        return trader_factor_df
+
+    def format_trader_factor_df(self, trader_factor_df):
+        Corps = ["금융투자", "보험", "투신", "사모"]
+        Indivisual = ["개인"]
+        Foreign = ["외국인"]
+
+        trader_factor_df["Corp"] = trader_factor_df.loc[:, Corps].sum(axis=1)
+        trader_factor_df["Indivisual"] = trader_factor_df.loc[:, Indivisual].sum(axis=1)
+        trader_factor_df["Foreign"] = trader_factor_df.loc[:, Foreign].sum(axis=1)
+        return trader_factor_df
+
+    def get_trader_filtered_stockcodes(self, trader_factor_df):
+        query = reduce(lambda x, y: " and ".join((x, y)), self.TRADER_CFG["FILTER_CFG"]["conditions"])
+        filtered_trader_df = trader_factor_df.query(query)
+        trader_filtered_stockcodes = set(filtered_trader_df["StockCode"])
+        return trader_filtered_stockcodes
+
+    def __call__(self, filtered_stockcodes):
+        trader_factor_df = self.load_trader_factor_df(filtered_stockcodes)
+        trader_factor_df = self.format_trader_factor_df(trader_factor_df)
+        trader_filtered_stockcodes = self.get_trader_filtered_stockcodes(trader_factor_df)
+        return trader_filtered_stockcodes
